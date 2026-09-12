@@ -95,12 +95,17 @@ bool WriteSteamAppIdFile( uint32_t nAppId )
 
 } // namespace
 
+bool IsDedicatedServer()
+{
+	return plat::ModuleLoaded( kDedicatedModule );
+}
+
 void Apply()
 {
-	if ( !plat::ModuleLoaded( kDedicatedModule ) )
+	if ( !IsDedicatedServer() )
 	{
-		// A listen server shares the game directory with the client, and
-		// steam_appid.txt there would change what the client launches as.
+		// steam_appid.txt in a client's game directory would change what the
+		// client itself launches as.
 		plat::Log( "csgo-multi-appid: not a dedicated server, doing nothing\n" );
 		return;
 	}

@@ -8,6 +8,7 @@
 
 #include "appid.h"
 #include "authproxy.h"
+#include "workshop.h"
 #include "platform.h"
 
 #include <cstdint>
@@ -37,6 +38,7 @@ public:
 	virtual bool Load( CreateInterfaceFn, CreateInterfaceFn )
 	{
 		appid::Apply();
+		workshop::Apply();
 		authproxy::Init();
 		return true;
 	}
@@ -44,6 +46,7 @@ public:
 	virtual void Unload()
 	{
 		authproxy::Shutdown();
+		workshop::Restore();
 		appid::Restore();
 	}
 

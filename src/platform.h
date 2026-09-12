@@ -22,8 +22,5 @@ const unsigned char *FindUnique( const unsigned char *pStart, size_t nSize, cons
 
 bool WriteMemory( void *pAddr, const void *pBytes, size_t nLen );
 
-// Value following pszKey on the process command line ("-appid 730" -> "730").
-bool CommandLineValue( const char *pszKey, char *pOut, size_t nOutLen );
-
 void SetEnv( const char *pszKey, const char *pszValue );
 }

@@ -1,7 +1,7 @@
 # csgo-multi-appid
 
-A Valve server plugin that pins the CS:GO dedicated server's Steam appid, so the
-server behaves identically no matter what `csgo/steam.inf` says.
+A **100% vibe coded** Valve server plugin that pins the CS:GO dedicated server's Steam appid, 
+so the server behaves identically no matter what `csgo/steam.inf` says.
 
 ## Why
 
@@ -37,9 +37,57 @@ Step 3 is a 4-byte write to a global the plugin locates by scanning the engine's
 match exactly once or the plugin leaves the global alone and says so. The
 original value is restored on unload.
 
-Nothing else is touched: no lobby behaviour, no workshop.
+Nothing else about the engine is touched: no lobby behaviour, no netcode.
 
-## Cross-appid clients (optional)
+## host_workshop_map
+
+Pinning the appid breaks the workshop, so the plugin fixes that too.
+
+`DedicatedServerUGCFileInfo_t::BuildFromKV` in the game DLL rejects any item
+whose `consumer_appid` is not `engine->GetAppID()`. Every CS:GO workshop item is
+published under 730, because the legacy appid has no workshop of its own, so on
+a server pinned to 4465480 every `host_workshop_map` and
+`host_workshop_collection` fails with:
+
+```
+UGC file info consumer_appid 730 != engine 4465480
+```
+
+The check is only wrong in comparing against one appid when this build has two.
+The plugin rewrites the half of it that calls `GetAppID`, so instead of
+
+```asm
+mov  ecx, dword_<engine>
+mov  ebx, eax                 ; the item's consumer_appid
+mov  edx, [ecx]
+call [edx+19Ch]               ; IVEngineServer::GetAppID
+cmp  ebx, eax
+jz   ok
+```
+
+the site reads
+
+```asm
+mov  ebx, eax                 ; the item's consumer_appid
+mov  eax, 4465480
+cmp  ebx, eax
+jz   +5                       ; falls through to the original cmp
+mov  eax, 730
+cmp  ebx, eax                 ; untouched
+jz   ok                       ; untouched
+```
+
+An item published under either appid passes; anything else still fails, with the
+engine's real appid in the warning, because the failure path re-reads it. The
+comparison, the ban check and every other field check are untouched, and the
+original bytes go back on unload.
+
+The patched region is the same length as what it replaces (16 bytes on Windows,
+21 on Linux, where the sequence also folds two calls' argument cleanup into one
+`add esp, 10h` that the replacement keeps). The signature must match exactly once
+or nothing is written.
+
+## Cross-appid clients
 
 Because the same build is distributed under two appids, clients launched under
 the *other* one present auth tickets the server cannot judge: Steam answers
@@ -71,9 +119,10 @@ local user, its own game server interface. Its callbacks are pumped with
 `Steam_BGetCallback` **on that pipe alone**, so the engine's own dispatch is
 untouched. Nothing outlives the server: if it dies, the validator dies with it.
 
-There is nothing to configure. Both appids are fixed constants, the validator
-validates whichever one the server is not pinned to, and it is on by default;
-`-nocrossappid` turns it off.
+There is nothing to configure and nothing to turn on: both appids are fixed
+constants, and the validator validates whichever one the server is not pinned
+to. It is not optional either, because a server that rejects every client from
+the other appid is the problem this plugin exists to remove.
 
 Only the mismatch case is diverted, and only on an affirmative pass. Invalid,
 expired, duplicate and version mismatch tickets keep the engine's own answer.
@@ -123,14 +172,9 @@ csgo/addons/csgo-multi-appid.so    (Linux)
 csgo/addons/csgo-multi-appid.vdf
 ```
 
-Plugins in `addons/*.vdf` load automatically on a dedicated server. Default
-target is **4465480**; override it on the server command line:
-
-```
-srcds_linux -game csgo -appid 730 ...
-```
-
-Expected output on startup:
+Plugins in `addons/*.vdf` load automatically on a dedicated server. There are no
+launch options: the server is pinned to **4465480**, and clients from **730**
+are validated against a second session. Expected output on startup:
 
 ```
 csgo-multi-appid: appid pinned to 4465480 (steam.inf said 730)

@@ -2,8 +2,9 @@
 
 namespace authproxy
 {
-// On by default -- it is what the plugin is for. -nocrossappid turns it off,
-// and there is nothing else to configure: both appids are fixed constants.
+// Unconditional: this is what the plugin is for, and there is nothing to
+// configure -- both appids are fixed constants, and the validator validates
+// whichever one the server is not pinned to.
 void Init();
 
 // The engine creates its Steam game server session at map load, well after

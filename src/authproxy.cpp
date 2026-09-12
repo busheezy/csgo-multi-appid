@@ -49,7 +49,9 @@ typedef steam::EBeginAuthSessionResult( *BeginAuthSessionFn )(
 	steam::ISteamGameServer *, const void *, int, uint64_t );
 #endif
 
-bool				s_bEnabled = true;
+// Set only if the hook cannot be installed; there is no way to turn the feature
+// off, because a server without it is a server that rejects half its players.
+bool				s_bBroken;
 bool				s_bHooked;
 bool				s_bValidatorStarted;
 BeginAuthSessionFn	s_pfnOriginal;
@@ -80,21 +82,13 @@ steam::EBeginAuthSessionResult HOOK_CALL Hook_BeginAuthSession( HOOK_THIS, const
 
 void Init()
 {
-	char buf[ 8 ];
-	if ( plat::CommandLineValue( "-nocrossappid", buf, sizeof( buf ) ) )
-	{
-		s_bEnabled = false;
-		plat::Log( "csgo-multi-appid: cross-appid validation disabled\n" );
-		return;
-	}
-
 	plat::Log( "csgo-multi-appid: clients whose tickets are for appid %u will be validated separately\n",
 			   appid::Other() );
 }
 
 void Tick()
 {
-	if ( !s_bEnabled )
+	if ( s_bBroken )
 		return;
 
 	// The engine creates its own Steam session at map load, long after plugins
@@ -115,8 +109,9 @@ void Tick()
 		void *pHook = (void *)&Hook_BeginAuthSession;
 		if ( !plat::WriteMemory( s_pVTableSlot, &pHook, sizeof( pHook ) ) )
 		{
-			plat::Warn( "csgo-multi-appid: could not install the BeginAuthSession hook\n" );
-			s_bEnabled = false;
+			plat::Warn( "csgo-multi-appid: could not install the BeginAuthSession hook;"
+						" clients from appid %u will keep being rejected\n", appid::Other() );
+			s_bBroken = true;
 			return;
 		}
 

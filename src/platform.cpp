@@ -247,66 +247,6 @@ bool WriteMemory( void *pAddr, const void *pBytes, size_t nLen )
 #endif
 }
 
-bool CommandLineValue( const char *pszKey, char *pOut, size_t nOutLen )
-{
-#if defined( _WIN32 )
-	const char *pCmd = GetCommandLineA();
-	if ( !pCmd )
-		return false;
-
-	size_t nKeyLen = strlen( pszKey );
-	for ( const char *p = pCmd; ( p = strstr( p, pszKey ) ) != nullptr; p += nKeyLen )
-	{
-		// Must be a whole token, and something must follow it.
-		if ( p != pCmd && p[ -1 ] != ' ' && p[ -1 ] != '"' )
-			continue;
-
-		const char *pVal = p + nKeyLen;
-		while ( *pVal == ' ' || *pVal == '"' )
-			++pVal;
-		if ( !*pVal )
-			return false;
-
-		size_t n = 0;
-		while ( pVal[ n ] && pVal[ n ] != ' ' && pVal[ n ] != '"' && n + 1 < nOutLen )
-		{
-			pOut[ n ] = pVal[ n ];
-			++n;
-		}
-		pOut[ n ] = '\0';
-		return n > 0;
-	}
-	return false;
-#else
-	FILE *f = fopen( "/proc/self/cmdline", "rb" );
-	if ( !f )
-		return false;
-
-	char buf[ 4096 ];
-	size_t nRead = fread( buf, 1, sizeof( buf ) - 1, f );
-	fclose( f );
-	if ( nRead == 0 )
-		return false;
-	buf[ nRead ] = '\0';
-
-	for ( size_t i = 0; i < nRead; )
-	{
-		const char *pArg = buf + i;
-		size_t nArg = strlen( pArg );
-		if ( strcmp( pArg, pszKey ) == 0 && i + nArg + 1 < nRead )
-		{
-			const char *pVal = buf + i + nArg + 1;
-			if ( !*pVal )
-				return false;
-			snprintf( pOut, nOutLen, "%s", pVal );
-			return true;
-		}
-		i += nArg + 1;
-	}
-	return false;
-#endif
-}
-
 void SetEnv( const char *pszKey, const char *pszValue )
 {
 #if defined( _WIN32 )

@@ -15,6 +15,10 @@ const uint32_t kAppIdRetail = 730;
 inline uint32_t Pinned() { return kAppIdLegacy; }
 inline uint32_t Other() { return kAppIdRetail; }
 
+// A listen server shares its game directory, and its engine and game DLL, with
+// the client, so nothing here should touch it.
+bool IsDedicatedServer();
+
 // Pins the effective appid: writes steam_appid.txt, exports SteamAppId, and
 // overwrites the engine's parsed steam.inf value so the advertised appid
 // matches the one the server logs on with.
