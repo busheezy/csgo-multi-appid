@@ -1,0 +1,261 @@
+#include "validator.h"
+#include "appid.h"
+#include "enginefwd.h"
+#include "platform.h"
+#include "steam_min.h"
+
+#include <cstring>
+#include <ctime>
+
+namespace validator
+{
+namespace
+{
+
+// InitGameServer does not bind anything: the socket steam_api opens belongs to
+// SteamGameServer_Init, which this session deliberately bypasses. These two
+// values are only ever reported to the master server, and this session never
+// heartbeats, so nothing reads them.
+const uint16_t kAdvertisedGamePort = 27015;
+const uint16_t kAdvertisedQueryPort = 27015;
+
+// How long an auth session may sit without a verdict before it is retired.
+// Without this a client that never gets an answer would hold its session
+// forever and reconnect as a duplicate request.
+const int kSessionLingerSeconds = 60;
+
+const int kMaxTracked = 64;
+
+struct Tracked
+{
+	uint64_t	steamID;
+	time_t		tStarted;
+	bool		bUsed;
+};
+
+steam::Api				s_Steam;
+steam::ISteamGameServer	*s_pServer;
+steam::HSteamPipe		s_hPipe;
+steam::HSteamUser		s_hUser;
+bool					s_bStarted;
+bool					s_bReady;
+Tracked					s_Tracked[ kMaxTracked ];
+
+void Track( uint64_t steamID )
+{
+	for ( auto &t : s_Tracked )
+	{
+		if ( !t.bUsed )
+		{
+			t = { steamID, time( nullptr ), true };
+			return;
+		}
+	}
+	plat::Warn( "csgo-multi-appid: validator session table full\n" );
+}
+
+void Retire( uint64_t steamID )
+{
+	for ( auto &t : s_Tracked )
+	{
+		if ( t.bUsed && t.steamID == steamID )
+		{
+			if ( s_pServer )
+				s_pServer->EndAuthSession( steamID );
+			t.bUsed = false;
+			return;
+		}
+	}
+}
+
+void HandleCallback( const steam::CallbackMsg_t &msg )
+{
+	if ( msg.m_iCallback != steam::ValidateAuthTicketResponse_t::k_iCallback )
+		return;
+	if ( !msg.m_pubParam || msg.m_cubParam < (int)sizeof( steam::ValidateAuthTicketResponse_t ) )
+		return;
+
+	const steam::ValidateAuthTicketResponse_t *p = (const steam::ValidateAuthTicketResponse_t *)msg.m_pubParam;
+
+	// Identity was already settled synchronously; what arrives here is ban and
+	// licence news about a client that is, by now, usually already playing.
+	// Hand it to the engine's own handler so the client is dealt with exactly as
+	// a native one would be -- ban checks, the reject path, and the state that
+	// makes the client count as fully authenticated on an OK verdict.
+	if ( !enginefwd::Forward( p->m_SteamID, (int)p->m_eAuthSessionResponse, p->m_OwnerSteamID ) )
+	{
+		plat::Warn( "csgo-multi-appid: %llu returned EAuthSessionResponse %d for appid %u,"
+					" but the engine's auth handler is unavailable so nothing acted on it\n",
+					(unsigned long long)p->m_SteamID, (int)p->m_eAuthSessionResponse, appid::Other() );
+	}
+	else if ( p->m_eAuthSessionResponse != steam::k_EAuthSessionResponseOK )
+	{
+		plat::Log( "csgo-multi-appid: %llu failed the follow-up check for appid %u"
+				   " (EAuthSessionResponse %d); handed to the engine\n",
+				   (unsigned long long)p->m_SteamID, appid::Other(), (int)p->m_eAuthSessionResponse );
+	}
+
+	Retire( p->m_SteamID );
+}
+
+} // namespace
+
+bool Start()
+{
+	if ( s_bStarted )
+		return true;
+
+	if ( !s_Steam.Load() )
+		return false;
+	if ( !s_Steam.BGetCallback || !s_Steam.FreeLastCallback )
+	{
+		plat::Warn( "csgo-multi-appid: Steam_BGetCallback is unavailable; cannot run a second session\n" );
+		return false;
+	}
+
+	steam::ISteamClient *pClient = s_Steam.Client();
+	if ( !pClient )
+		return false;
+
+	s_hPipe = pClient->CreateSteamPipe();
+	if ( !s_hPipe )
+	{
+		plat::Warn( "csgo-multi-appid: CreateSteamPipe failed\n" );
+		return false;
+	}
+
+	s_hUser = pClient->CreateLocalUser( &s_hPipe, steam::kEAccountTypeGameServer );
+	if ( !s_hUser )
+	{
+		plat::Warn( "csgo-multi-appid: CreateLocalUser failed\n" );
+		pClient->BReleaseSteamPipe( s_hPipe );
+		s_hPipe = 0;
+		return false;
+	}
+
+	s_pServer = s_Steam.GameServer( s_hUser, s_hPipe );
+	if ( !s_pServer )
+	{
+		plat::Warn( "csgo-multi-appid: no %s on the validator pipe\n", steam::kSteamGameServerVersion );
+		Stop();
+		return false;
+	}
+
+	// The appid is explicit here, which is the whole reason this can live in the
+	// same process as a server logged on as the other one.
+	if ( !s_pServer->InitGameServer( 0, kAdvertisedGamePort, kAdvertisedQueryPort,
+									 steam::kServerFlagDedicated | steam::kServerFlagSecure,
+									 appid::Other(), "1.0.0.0" ) )
+	{
+		plat::Warn( "csgo-multi-appid: InitGameServer for appid %u failed\n", appid::Other() );
+		Stop();
+		return false;
+	}
+
+	s_pServer->SetProduct( "csgo" );
+	s_pServer->SetGameDescription( "cross-appid ticket validator" );
+	s_pServer->SetModDir( "csgo" );
+	s_pServer->SetDedicatedServer( true );
+	s_pServer->LogOnAnonymous();
+
+	s_bStarted = true;
+
+	// authproxy only gets here once the engine has its own Steam session, which
+	// means CSteam3Server exists and can be located.
+	enginefwd::Init();
+
+	plat::Log( "csgo-multi-appid: validator session logging on as appid %u\n", appid::Other() );
+	return true;
+}
+
+void Pump()
+{
+	if ( !s_bStarted || !s_hPipe )
+		return;
+
+	steam::CallbackMsg_t msg;
+	while ( s_Steam.BGetCallback( s_hPipe, &msg ) )
+	{
+		HandleCallback( msg );
+		s_Steam.FreeLastCallback( s_hPipe );
+	}
+
+	if ( !s_bReady && s_pServer && s_pServer->BLoggedOn() )
+	{
+		s_bReady = true;
+		plat::Log( "csgo-multi-appid: validator ready (appid %u)\n", appid::Other() );
+	}
+
+	const time_t now = time( nullptr );
+	for ( auto &t : s_Tracked )
+	{
+		if ( t.bUsed && now - t.tStarted > kSessionLingerSeconds )
+		{
+			if ( s_pServer )
+				s_pServer->EndAuthSession( t.steamID );
+			t.bUsed = false;
+		}
+	}
+}
+
+bool Ready()
+{
+	return s_bReady;
+}
+
+bool Validate( uint64_t steamID, const void *pTicket, int cbTicket )
+{
+	if ( !s_bReady || !s_pServer || !steamID || !pTicket || cbTicket <= 0 )
+		return false;
+
+	// Retire any session this account still holds, or Steam answers the retry
+	// with DuplicateRequest rather than judging the ticket.
+	Retire( steamID );
+
+	const steam::EBeginAuthSessionResult result = s_pServer->BeginAuthSession( pTicket, cbTicket, steamID );
+	if ( result != steam::k_EBeginAuthSessionResultOK )
+	{
+		plat::Log( "csgo-multi-appid: validator rejected %llu for appid %u (EBeginAuthSessionResult %d)\n",
+				   (unsigned long long)steamID, appid::Other(), (int)result );
+		return false;
+	}
+
+	// Session stays open so the follow-up verdict can still arrive; Pump()
+	// retires it when it does, or when it goes stale.
+	Track( steamID );
+	return true;
+}
+
+void Stop()
+{
+	if ( s_pServer )
+	{
+		for ( auto &t : s_Tracked )
+		{
+			if ( t.bUsed )
+			{
+				s_pServer->EndAuthSession( t.steamID );
+				t.bUsed = false;
+			}
+		}
+
+		if ( s_bStarted )
+			s_pServer->LogOff();
+	}
+
+	steam::ISteamClient *pClient = s_Steam.Client();
+	if ( pClient && s_hPipe )
+	{
+		if ( s_hUser )
+			pClient->ReleaseUser( s_hPipe, s_hUser );
+		pClient->BReleaseSteamPipe( s_hPipe );
+	}
+
+	s_pServer = nullptr;
+	s_hPipe = 0;
+	s_hUser = 0;
+	s_bStarted = false;
+	s_bReady = false;
+}
+
+} // namespace validator

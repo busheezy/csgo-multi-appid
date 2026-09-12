@@ -1,0 +1,9 @@
+build/
+.xmake/
+package/
+releases/
+compile_commands.json
+*.pdb
+*.ilk
+*.exp
+*.lib

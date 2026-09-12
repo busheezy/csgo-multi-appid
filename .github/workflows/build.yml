@@ -1,0 +1,130 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: Windows (x86)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+
+      - name: Build
+        shell: bash
+        run: |
+          xmake f -p windows -a x86 -m release -y
+          xmake
+
+      - name: Test
+        shell: bash
+        run: |
+          xmake build sigtest
+          xmake run sigtest
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p package/addons
+          cp build/windows/x86/release/csgo-multi-appid.dll package/addons/
+          cp csgo-multi-appid.vdf package/addons/
+
+      - name: Upload plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: csgo-multi-appid-windows
+          path: ./package
+
+  linux:
+    name: Linux (i386)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The dedicated server is 32-bit, so the plugin needs the multilib toolchain.
+      - name: Install 32-bit toolchain
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y g++-multilib gcc-multilib
+
+      - name: Setup xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+
+      - name: Build
+        run: |
+          xmake f -p linux -a i386 -m release -y
+          xmake
+
+      - name: Test
+        run: |
+          xmake build sigtest
+          xmake run sigtest
+
+      - name: Package
+        run: |
+          mkdir -p package/addons
+          cp build/linux/i386/release/csgo-multi-appid.so package/addons/
+          cp csgo-multi-appid.vdf package/addons/
+
+      - name: Upload plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: csgo-multi-appid-linux
+          path: ./package
+
+  release:
+    name: Release
+    # Rolling release from the default branch only, never from a fork's PR.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    needs: [windows, linux]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: csgo-multi-appid-windows
+          path: windows
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: csgo-multi-appid-linux
+          path: linux
+
+      - name: Package
+        run: |
+          mkdir -p releases
+          (cd windows && zip -r ../releases/csgo-multi-appid-windows.zip .)
+          (cd linux && zip -r ../releases/csgo-multi-appid-linux.zip .)
+          mkdir -p combined/addons
+          cp windows/addons/csgo-multi-appid.dll combined/addons/
+          cp linux/addons/csgo-multi-appid.so combined/addons/
+          cp csgo-multi-appid.vdf combined/addons/
+          (cd combined && zip -r ../releases/csgo-multi-appid.zip .)
+
+      - name: Move the rolling tag
+        run: |
+          git tag -f latest
+          git push -f origin latest
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          files: releases/*
+          generate_release_notes: false
+          prerelease: false
