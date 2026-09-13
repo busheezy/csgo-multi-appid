@@ -31,6 +31,13 @@ const int kSessionLingerSeconds = 60;
 
 const int kMaxTracked = 64;
 
+// Opening the second session can fail while the engine's own Steam session is
+// still settling, so a failure is not taken as final -- it is retried for a
+// couple of minutes first. Without this one early miss would leave cross-appid
+// clients rejected for the life of the server.
+const int kStartAttempts = 24;
+const int kStartRetrySeconds = 5;
+
 struct Tracked
 {
 	uint64_t	steamID;
@@ -44,7 +51,17 @@ steam::HSteamPipe		s_hPipe;
 steam::HSteamUser		s_hUser;
 bool					s_bStarted;
 bool					s_bReady;
+bool					s_bGaveUp;
+int						s_nAttempts;
+time_t					s_tNextAttempt;
 Tracked					s_Tracked[ kMaxTracked ];
+
+// The same failure line every five seconds for two minutes helps nobody: say it
+// on the first attempt and again on the last.
+bool Loud()
+{
+	return s_nAttempts == 1 || s_nAttempts >= kStartAttempts;
+}
 
 void Track( uint64_t steamID )
 {
@@ -103,18 +120,14 @@ void HandleCallback( const steam::CallbackMsg_t &msg )
 	Retire( p->m_SteamID );
 }
 
-} // namespace
-
-bool Start()
+bool TryStart()
 {
-	if ( s_bStarted )
-		return true;
-
 	if ( !s_Steam.Load() )
 		return false;
 	if ( !s_Steam.BGetCallback || !s_Steam.FreeLastCallback )
 	{
-		plat::Warn( "csgo-multi-appid: Steam_BGetCallback is unavailable; cannot run a second session\n" );
+		if ( Loud() )
+			plat::Warn( "csgo-multi-appid: Steam_BGetCallback is unavailable; cannot run a second session\n" );
 		return false;
 	}
 
@@ -122,26 +135,46 @@ bool Start()
 	if ( !pClient )
 		return false;
 
+	// Two ways in, and which one works depends on the platform. CreateSteamPipe
+	// is the obvious one and is what Windows takes, where steamclient has a
+	// Steam client process to connect the pipe to. A headless Linux server has
+	// no Steam client and it returns 0 there. CreateLocalUser is the game
+	// server bootstrap -- handed a zeroed pipe handle it creates the pipe as
+	// well as the user, which is how SteamGameServer_Init gets one.
 	s_hPipe = pClient->CreateSteamPipe();
-	if ( !s_hPipe )
-	{
-		plat::Warn( "csgo-multi-appid: CreateSteamPipe failed\n" );
-		return false;
-	}
+	if ( s_hPipe )
+		s_hUser = pClient->CreateLocalUser( &s_hPipe, steam::kEAccountTypeGameServer );
 
-	s_hUser = pClient->CreateLocalUser( &s_hPipe, steam::kEAccountTypeGameServer );
 	if ( !s_hUser )
 	{
-		plat::Warn( "csgo-multi-appid: CreateLocalUser failed\n" );
-		pClient->BReleaseSteamPipe( s_hPipe );
-		s_hPipe = 0;
+		if ( s_hPipe )
+		{
+			pClient->BReleaseSteamPipe( s_hPipe );
+			s_hPipe = 0;
+		}
+		s_hUser = pClient->CreateLocalUser( &s_hPipe, steam::kEAccountTypeGameServer );
+	}
+
+	if ( !s_hPipe || !s_hUser )
+	{
+		// The engine's own handles come along for the ride: if those are zero
+		// too then Steam is simply not up yet and the retry will get it, and if
+		// they are not then whatever refused us is specific to a second session.
+		if ( Loud() )
+			plat::Warn( "csgo-multi-appid: could not open a second Steam session"
+						" (pipe %d, user %d; the engine has pipe %d, user %d)\n",
+						(int)s_hPipe, (int)s_hUser,
+						(int)( s_Steam.GetHSteamPipe ? s_Steam.GetHSteamPipe() : 0 ),
+						(int)( s_Steam.GetHSteamUser ? s_Steam.GetHSteamUser() : 0 ) );
+		Stop();
 		return false;
 	}
 
 	s_pServer = s_Steam.GameServer( s_hUser, s_hPipe );
 	if ( !s_pServer )
 	{
-		plat::Warn( "csgo-multi-appid: no %s on the validator pipe\n", steam::kSteamGameServerVersion );
+		if ( Loud() )
+			plat::Warn( "csgo-multi-appid: no %s on the validator pipe\n", steam::kSteamGameServerVersion );
 		Stop();
 		return false;
 	}
@@ -164,7 +197,8 @@ bool Start()
 
 	if ( !bInit )
 	{
-		plat::Warn( "csgo-multi-appid: InitGameServer for appid %u failed\n", appid::Other() );
+		if ( Loud() )
+			plat::Warn( "csgo-multi-appid: InitGameServer for appid %u failed\n", appid::Other() );
 		Stop();
 		return false;
 	}
@@ -175,15 +209,45 @@ bool Start()
 	s_pServer->SetDedicatedServer( true );
 	s_pServer->LogOnAnonymous();
 
-	s_bStarted = true;
-	plat::Log( "csgo-multi-appid: validator session on port %u\n", nGamePort );
-
 	// authproxy only gets here once the engine has its own Steam session, which
 	// means CSteam3Server exists and can be located.
 	enginefwd::Init();
 
-	plat::Log( "csgo-multi-appid: validator session logging on as appid %u\n", appid::Other() );
+	plat::Log( "csgo-multi-appid: validator session on port %u, logging on as appid %u\n",
+			   nGamePort, appid::Other() );
 	return true;
+}
+
+} // namespace
+
+bool Start()
+{
+	if ( s_bStarted )
+		return true;
+	if ( s_bGaveUp )
+		return false;
+
+	const time_t now = time( nullptr );
+	if ( s_nAttempts && now < s_tNextAttempt )
+		return false;
+
+	s_tNextAttempt = now + kStartRetrySeconds;
+	++s_nAttempts;
+
+	if ( TryStart() )
+	{
+		s_bStarted = true;
+		return true;
+	}
+
+	if ( s_nAttempts >= kStartAttempts )
+	{
+		s_bGaveUp = true;
+		plat::Warn( "csgo-multi-appid: giving up on the validator session after %d attempts;"
+					" clients from appid %u will keep being rejected\n",
+					s_nAttempts, appid::Other() );
+	}
+	return false;
 }
 
 void Pump()

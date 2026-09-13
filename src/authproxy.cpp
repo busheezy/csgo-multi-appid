@@ -118,13 +118,13 @@ void Tick()
 		s_bHooked = true;
 	}
 
+	// Start() retries on its own schedule and says so when it gives up, so
+	// this just keeps asking until it takes.
 	if ( !s_bValidatorStarted )
 	{
-		s_bValidatorStarted = true;
 		if ( !validator::Start() )
-			plat::Warn( "csgo-multi-appid: validator session could not start;"
-						" clients from appid %u will keep being rejected\n", appid::Other() );
-		return;
+			return;
+		s_bValidatorStarted = true;
 	}
 
 	validator::Pump();
