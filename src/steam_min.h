@@ -1,10 +1,11 @@
 // Minimal Steamworks mirrors.
 //
-// Unlike the engine's own interfaces, these are safe to mirror from the public
-// headers: the layout of a Steam interface is pinned by the version string you
-// ask for, so "SteamGameServer012" means the same vtable everywhere. Only the
-// slots this project calls carry real signatures; the rest are padding that
-// exists to put those methods at the right index.
+// A Steam interface's layout is pinned by the version string you ask for, so
+// "SteamClient017" means the same vtable everywhere and mirroring one is safe
+// in a way that mirroring an engine interface is not. What is not safe is
+// assuming which version the engine asks for -- see ISteamGameServer below.
+// Only the slots this project calls carry real signatures; the rest are padding
+// that exists to put those methods at the right index.
 #pragma once
 
 #include <cstdint>
@@ -16,7 +17,28 @@ typedef int32_t HSteamPipe;
 typedef int32_t HSteamUser;
 
 const char *const kSteamClientVersion = "SteamClient017";
-const char *const kSteamGameServerVersion = "SteamGameServer012";
+
+// The version of ISteamGameServer is not this plugin's to choose. steamclient
+// hands out a separate adapter object per version, each with its own vtable, so
+// asking for a version other than the one the engine asked for gets a different
+// object, and hooking that one changes nothing because the engine never calls
+// it. The slot BeginAuthSession sits at moves between versions too, so a
+// mismatch is not merely useless but dangerous: the write lands on whichever
+// method occupies that index instead.
+//
+// So the version is read out of the engine binary rather than assumed, and the
+// slot is looked up beside it. A version whose slots have not been checked gets
+// no hook at all.
+//
+// The mirror below is ISteamGameServer014, which is what the engine asks for.
+// Its BeginAuthSession slot is verified two ways: CSteam3Server::
+// NotifyClientConnect calls `call [edx+68h]` in engine.dll and `call [ecx+68h]`
+// in engine.so, 0x68 / 4 = 26; and the SDK v1.52 header agrees, once allowance
+// is made for it having dropped InitGameServer from the published interface
+// without the implementation losing the slot -- every slot below is one higher
+// than that header's.
+const char *GameServerVersion();
+int BeginAuthSessionSlot();
 
 const int kEAccountTypeGameServer = 3;
 
@@ -103,13 +125,10 @@ public:
 	virtual void	_SetGameTags() = 0;									// 21
 	virtual void	_SetGameData() = 0;									// 22
 	virtual void	_SetRegion() = 0;									// 23
-	virtual void	_SendUserConnectAndAuthenticate() = 0;				// 24
-	virtual void	_CreateUnauthenticatedUserConnection() = 0;			// 25
-	virtual void	_SendUserDisconnect() = 0;							// 26
-	virtual void	_BUpdateUserData() = 0;								// 27
-	virtual void	_GetAuthSessionTicket() = 0;						// 28
-	virtual EBeginAuthSessionResult BeginAuthSession( const void *pAuthTicket, int cbAuthTicket, uint64_t steamID ) = 0; // 29
-	virtual void	EndAuthSession( uint64_t steamID ) = 0;				// 30
+	virtual void	_SetAdvertiseServerActive() = 0;					// 24
+	virtual void	_GetAuthSessionTicket() = 0;						// 25
+	virtual EBeginAuthSessionResult BeginAuthSession( const void *pAuthTicket, int cbAuthTicket, uint64_t steamID ) = 0; // 26
+	virtual void	EndAuthSession( uint64_t steamID ) = 0;				// 27
 };
 
 class ISteamClient

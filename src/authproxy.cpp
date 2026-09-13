@@ -28,8 +28,6 @@ namespace authproxy
 namespace
 {
 
-// ISteamGameServer slot 29; see steam_min.h for the full layout.
-const int kBeginAuthSessionSlot = 29;
 const int kMaxTicketBytes = 1400;
 
 #if defined( _WIN32 )
@@ -102,8 +100,17 @@ void Tick()
 		if ( !pGameServer )
 			return; // no session yet, try again next frame
 
+		// Which slot this is depends on the interface version the engine asked
+		// for, so it is looked up rather than assumed; see steam_min.h.
+		const int nSlot = steam::BeginAuthSessionSlot();
+		if ( nSlot < 0 )
+		{
+			s_bBroken = true;
+			return;
+		}
+
 		void **pVTable = *(void ***)pGameServer;
-		s_pVTableSlot = &pVTable[ kBeginAuthSessionSlot ];
+		s_pVTableSlot = &pVTable[ nSlot ];
 		s_pfnOriginal = (BeginAuthSessionFn)*s_pVTableSlot;
 
 		void *pHook = (void *)&Hook_BeginAuthSession;

@@ -13,6 +13,11 @@ void Warn( const char *pszFormat, ... );
 
 // Executable range of a loaded module, named as the file is ("engine.dll", "engine.so").
 bool ModuleTextRange( const char *pszModule, const unsigned char **ppStart, size_t *pSize );
+
+// The module's whole mapped image rather than just its code. A pointer read out
+// of an instruction operand is only a number until it is known to land in here,
+// and dereferencing one that does not takes the server down.
+bool ModuleImageRange( const char *pszModule, const unsigned char **ppStart, size_t *pSize );
 bool ModuleLoaded( const char *pszModule );
 
 // Pattern is hex bytes with "??" wildcards, e.g. "8B F0 ?? ?? 85 F6".

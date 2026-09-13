@@ -30,6 +30,74 @@ const char *const kSteamClientModule = "steamclient.so";
 void *s_hSteamApi;
 void *s_hSteamClient;
 
+#if defined( _WIN32 )
+const char *const kEngineModule = "engine.dll";
+#else
+const char *const kEngineModule = "engine.so";
+#endif
+
+// Only a version whose BeginAuthSession slot has been read out of a binary
+// belongs here, and only for as long as a build that asks for it is actually
+// supported. A version that is not in this table gets no hook, because the
+// alternative is writing over whichever method happens to live at a guessed
+// index. Adding a row means checking the slot first -- the layout mirrored in
+// steam_min.h has to match it too.
+struct GameServerVersion_t
+{
+	const char	*pszVersion;
+	int			nBeginAuthSessionSlot;
+};
+
+const GameServerVersion_t kGameServerVersions[] = {
+	{ "SteamGameServer014", 26 },
+};
+
+const GameServerVersion_t *s_pVersion;
+bool s_bVersionResolved;
+
+// Whole-word search: the terminator is part of the needle so that a longer
+// version string cannot match on its prefix.
+bool ImageContains( const unsigned char *pStart, size_t nSize, const char *pszNeedle )
+{
+	const size_t nLen = strlen( pszNeedle ) + 1;
+	if ( nLen > nSize )
+		return false;
+
+	const unsigned char nFirst = (unsigned char)pszNeedle[ 0 ];
+	for ( size_t i = 0; i + nLen <= nSize; ++i )
+	{
+		if ( pStart[ i ] == nFirst && memcmp( pStart + i, pszNeedle, nLen ) == 0 )
+			return true;
+	}
+	return false;
+}
+
+void ResolveVersion()
+{
+	if ( s_bVersionResolved )
+		return;
+	s_bVersionResolved = true;
+
+	const unsigned char *pImage = nullptr;
+	size_t nSize = 0;
+	if ( !plat::ModuleImageRange( kEngineModule, &pImage, &nSize ) )
+		return;
+
+	for ( const GameServerVersion_t &v : kGameServerVersions )
+	{
+		if ( !ImageContains( pImage, nSize, v.pszVersion ) )
+			continue;
+
+		s_pVersion = &v;
+		plat::Log( "csgo-multi-appid: the engine talks %s (BeginAuthSession is slot %d)\n",
+				   v.pszVersion, v.nBeginAuthSessionSlot );
+		return;
+	}
+
+	plat::Warn( "csgo-multi-appid: %s asks for an ISteamGameServer version this build does not know;"
+				" cross-appid clients cannot be validated\n", kEngineModule );
+}
+
 void *OpenLoaded( const char *pszName )
 {
 #if defined( _WIN32 )
@@ -60,6 +128,18 @@ void *DispatchSymbol( const char *pszName )
 }
 
 } // namespace
+
+const char *GameServerVersion()
+{
+	ResolveVersion();
+	return s_pVersion ? s_pVersion->pszVersion : nullptr;
+}
+
+int BeginAuthSessionSlot()
+{
+	ResolveVersion();
+	return s_pVersion ? s_pVersion->nBeginAuthSessionSlot : -1;
+}
 
 bool Api::Load()
 {
@@ -103,8 +183,12 @@ ISteamGameServer *Api::GameServer( HSteamUser hUser, HSteamPipe hPipe )
 	if ( !hUser || !hPipe )
 		return nullptr;
 
+	const char *pszVersion = GameServerVersion();
+	if ( !pszVersion )
+		return nullptr;
+
 	ISteamClient *pClient = Client();
-	return pClient ? pClient->GetISteamGameServer( hUser, hPipe, kSteamGameServerVersion ) : nullptr;
+	return pClient ? pClient->GetISteamGameServer( hUser, hPipe, pszVersion ) : nullptr;
 }
 
 ISteamGameServer *Api::EngineGameServer()

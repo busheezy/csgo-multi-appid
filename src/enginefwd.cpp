@@ -44,13 +44,26 @@ const int kServerModeOffset = 0x98;
 typedef void( __attribute__( ( regparm( 3 ) ) ) *OnValidateFn )( void *pThis, void *pResponse );
 #endif
 
-OnValidateFn	s_pfnOnValidate;
-void			*s_pSteam3Server;
-bool			s_bTried;
+OnValidateFn		s_pfnOnValidate;
+void				*s_pSteam3Server;
+bool				s_bTried;
+const unsigned char	*s_pImage;
+size_t				s_nImageSize;
+
+// A candidate address comes out of an instruction operand, so it is a number
+// and nothing more until it is known to land inside the engine's own mapped
+// image. Most of the sequences the Linux scan below matches are not the getter
+// being looked for, and their operands are not addresses at all: reading
+// through one takes the server down with SIGSEGV.
+bool InEngineImage( const void *p, size_t nLen )
+{
+	const unsigned char *pAddr = (const unsigned char *)p;
+	return s_pImage && pAddr >= s_pImage && pAddr + nLen <= s_pImage + s_nImageSize;
+}
 
 bool LooksLikeSteam3Server( const void *p )
 {
-	if ( !p )
+	if ( !p || !InEngineImage( p, kServerModeOffset + sizeof( int ) ) )
 		return false;
 
 	// eServerModeNoAuthentication .. eServerModeAuthenticationAndSecure
@@ -69,6 +82,10 @@ bool Init()
 	const unsigned char *pText = nullptr;
 	size_t nSize = 0;
 	if ( !plat::ModuleTextRange( kEngineModule, &pText, &nSize ) )
+		return false;
+
+	// Needed before any candidate is looked at, not after.
+	if ( !plat::ModuleImageRange( kEngineModule, &s_pImage, &s_nImageSize ) )
 		return false;
 
 	const unsigned char *pHandler = plat::FindUnique( pText, nSize, kHandlerSig );

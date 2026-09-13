@@ -83,6 +83,7 @@ struct ModuleRange_t
 	unsigned char	*pStart;
 	size_t			nSize;
 	bool			bFound;
+	bool			bWholeImage;
 };
 
 const char *BaseName( const char *pszPath )
@@ -99,14 +100,40 @@ int ModuleCallback( struct dl_phdr_info *pInfo, size_t, void *pUser )
 	if ( strcmp( BaseName( pInfo->dlpi_name ), pQuery->pszWanted ) != 0 )
 		return 0;
 
+	uintptr_t nLow = 0;
+	uintptr_t nHigh = 0;
+
 	for ( int i = 0; i < pInfo->dlpi_phnum; ++i )
 	{
 		const ElfW( Phdr ) &phdr = pInfo->dlpi_phdr[ i ];
-		if ( phdr.p_type != PT_LOAD || !( phdr.p_flags & PF_X ) )
+		if ( phdr.p_type != PT_LOAD )
+			continue;
+
+		if ( pQuery->bWholeImage )
+		{
+			// p_memsz rather than p_filesz: .bss is mapped too, and that is
+			// where the globals worth checking a pointer against tend to live.
+			const uintptr_t nStart = pInfo->dlpi_addr + phdr.p_vaddr;
+			if ( !nHigh || nStart < nLow )
+				nLow = nStart;
+			if ( nStart + phdr.p_memsz > nHigh )
+				nHigh = nStart + phdr.p_memsz;
+			continue;
+		}
+
+		if ( !( phdr.p_flags & PF_X ) )
 			continue;
 
 		pQuery->pStart = (unsigned char *)( pInfo->dlpi_addr + phdr.p_vaddr );
 		pQuery->nSize = phdr.p_memsz;
+		pQuery->bFound = true;
+		return 1;
+	}
+
+	if ( pQuery->bWholeImage && nHigh > nLow )
+	{
+		pQuery->pStart = (unsigned char *)nLow;
+		pQuery->nSize = nHigh - nLow;
 		pQuery->bFound = true;
 		return 1;
 	}
@@ -155,7 +182,33 @@ bool ModuleTextRange( const char *pszModule, const unsigned char **ppStart, size
 	}
 	return false;
 #else
-	ModuleRange_t query = { pszModule, nullptr, 0, false };
+	ModuleRange_t query = { pszModule, nullptr, 0, false, false };
+	dl_iterate_phdr( ModuleCallback, &query );
+	if ( !query.bFound )
+		return false;
+
+	*ppStart = query.pStart;
+	*pSize = query.nSize;
+	return true;
+#endif
+}
+
+bool ModuleImageRange( const char *pszModule, const unsigned char **ppStart, size_t *pSize )
+{
+#if defined( _WIN32 )
+	HMODULE h = GetModuleHandleA( pszModule );
+	if ( !h )
+		return false;
+
+	unsigned char *pBase = (unsigned char *)h;
+	IMAGE_DOS_HEADER *pDos = (IMAGE_DOS_HEADER *)pBase;
+	IMAGE_NT_HEADERS *pNt = (IMAGE_NT_HEADERS *)( pBase + pDos->e_lfanew );
+
+	*ppStart = pBase;
+	*pSize = pNt->OptionalHeader.SizeOfImage;
+	return true;
+#else
+	ModuleRange_t query = { pszModule, nullptr, 0, false, true };
 	dl_iterate_phdr( ModuleCallback, &query );
 	if ( !query.bFound )
 		return false;

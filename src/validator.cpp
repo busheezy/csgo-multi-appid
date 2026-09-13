@@ -174,7 +174,7 @@ bool TryStart()
 	if ( !s_pServer )
 	{
 		if ( Loud() )
-			plat::Warn( "csgo-multi-appid: no %s on the validator pipe\n", steam::kSteamGameServerVersion );
+			plat::Warn( "csgo-multi-appid: no ISteamGameServer on the validator pipe\n" );
 		Stop();
 		return false;
 	}
