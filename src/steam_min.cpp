@@ -129,6 +129,12 @@ void *DispatchSymbol( const char *pszName )
 
 } // namespace
 
+bool ModulesReady()
+{
+	Api probe;
+	return probe.Load() && probe.BGetCallback && probe.FreeLastCallback;
+}
+
 const char *GameServerVersion()
 {
 	ResolveVersion();

@@ -8,6 +8,7 @@
 
 #include "appid.h"
 #include "authproxy.h"
+#include "gametick.h"
 #include "workshop.h"
 #include "platform.h"
 
@@ -35,16 +36,21 @@ enum PluginResult_t
 class CMultiAppIdPlugin
 {
 public:
-	virtual bool Load( CreateInterfaceFn, CreateInterfaceFn )
+	virtual bool Load( CreateInterfaceFn, CreateInterfaceFn gameServerFactory )
 	{
 		appid::Apply();
 		workshop::Apply();
 		authproxy::Init();
+
+		// Where the per-frame work actually comes from; see gametick.h for why
+		// GameFrame is not good enough.
+		gametick::Install( (gametick::CreateInterfaceFn)gameServerFactory, &authproxy::Tick );
 		return true;
 	}
 
 	virtual void Unload()
 	{
+		gametick::Remove();
 		authproxy::Shutdown();
 		workshop::Restore();
 		appid::Restore();
@@ -55,7 +61,9 @@ public:
 	virtual const char		*GetPluginDescription() { return "csgo-multi-appid"; }
 	virtual void			LevelInit( const char * ) {}
 	virtual void			ServerActivate( void *, int, int ) {}
-	virtual void			GameFrame( bool ) { authproxy::Tick(); }
+	// Only a fallback: when the Think hook is in place this would just be a
+	// second tick on the frames that run anyway.
+	virtual void			GameFrame( bool ) { if ( !gametick::Installed() ) authproxy::Tick(); }
 	virtual void			LevelShutdown() {}
 	virtual void			ClientActive( void * ) {}
 	virtual void			ClientFullyConnect( void * ) {}

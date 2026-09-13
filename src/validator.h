@@ -21,7 +21,22 @@ bool Start();
 // and meant to be called every frame.
 void Pump();
 
+// Asks Steam directly rather than reporting something Pump() latched, because
+// on a hibernating server Pump() may not have run since the logon completed.
 bool Ready();
+
+// The hook fires for every BeginAuthSession on the patched vtable, and this
+// session's own calls go through the same one when it turns out the engine and
+// the validator share an adapter class. Used to let those through untouched.
+bool IsOwnInterface( const void *pInterface );
+
+// This session's own ISteamGameServer, so the hook can go on without waiting
+// for the engine to have one of its own.
+void *Interface();
+
+// The engine's ISteamGameServer, once it has one. Null until the engine's own
+// Steam session exists, which is well after plugins load.
+void *EngineInterface();
 
 // Synchronous, and deliberately so. BeginAuthSession decides InvalidTicket,
 // GameMismatch and ExpiredTicket on the spot -- that is ticket parsing and the

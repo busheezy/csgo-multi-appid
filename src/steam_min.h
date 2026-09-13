@@ -37,6 +37,11 @@ const char *const kSteamClientVersion = "SteamClient017";
 // is made for it having dropped InitGameServer from the published interface
 // without the implementation losing the slot -- every slot below is one higher
 // than that header's.
+// Whether the Steam modules this needs are loaded at all. False early on: the
+// engine only loads steamclient when it activates its own game server session,
+// which is at map load, long after plugins.
+bool ModulesReady();
+
 const char *GameServerVersion();
 int BeginAuthSessionSlot();
 

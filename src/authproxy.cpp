@@ -49,16 +49,113 @@ typedef steam::EBeginAuthSessionResult( *BeginAuthSessionFn )(
 
 // Set only if the hook cannot be installed; there is no way to turn the feature
 // off, because a server without it is a server that rejects half its players.
+// The engine's ISteamGameServer and the validator's may be instances of one
+// adapter class sharing a vtable, or not, and which it is decides whether one
+// patch covers both. Rather than depend on the answer, each distinct vtable
+// seen gets patched once and restored on unload.
+struct Patch_t
+{
+	void	**ppSlot;
+	void	*pOriginal;
+};
+
+const int			kMaxPatches = 2;
+
+steam::EBeginAuthSessionResult HOOK_CALL Hook_BeginAuthSession(
+	HOOK_THIS, const void *pTicket, int cbTicket, uint64_t steamID );
+
 bool				s_bBroken;
-bool				s_bHooked;
 bool				s_bValidatorStarted;
 BeginAuthSessionFn	s_pfnOriginal;
-void				**s_pVTableSlot;
-steam::Api			s_Steam;
+Patch_t				s_Patches[ kMaxPatches ];
+int					s_nPatches;
+
+bool InstallHook( steam::ISteamGameServer *pServer )
+{
+	if ( !pServer )
+		return false;
+
+	const int nSlot = steam::BeginAuthSessionSlot();
+	if ( nSlot < 0 )
+	{
+		s_bBroken = true;
+		return false;
+	}
+
+	void **pVTable = *(void ***)pServer;
+	void **ppSlot = &pVTable[ nSlot ];
+
+	for ( int i = 0; i < s_nPatches; ++i )
+	{
+		if ( s_Patches[ i ].ppSlot == ppSlot )
+			return true; // already patched, whoever asked for it
+	}
+
+	if ( s_nPatches >= kMaxPatches )
+		return false;
+
+	// Every patched vtable has to forward to the same original, so a second
+	// distinct vtable is only safe if its slot holds the same function.
+	BeginAuthSessionFn pfnOriginal = (BeginAuthSessionFn)*ppSlot;
+	if ( s_nPatches && pfnOriginal != s_pfnOriginal )
+	{
+		plat::Warn( "csgo-multi-appid: a second ISteamGameServer vtable has a different"
+					" BeginAuthSession; leaving it alone\n" );
+		return false;
+	}
+
+	void *pHook = (void *)&Hook_BeginAuthSession;
+	if ( !plat::WriteMemory( ppSlot, &pHook, sizeof( pHook ) ) )
+	{
+		plat::Warn( "csgo-multi-appid: could not install the BeginAuthSession hook;"
+					" clients from appid %u will keep being rejected\n", appid::Other() );
+		s_bBroken = true;
+		return false;
+	}
+
+	s_pfnOriginal = pfnOriginal;
+	s_Patches[ s_nPatches ].ppSlot = ppSlot;
+	s_Patches[ s_nPatches ].pOriginal = (void *)pfnOriginal;
+	++s_nPatches;
+	return true;
+}
+
+// Everything the feature needs, done as early as it can be done. Nothing here
+// waits on the engine's own Steam session: the validator builds its own, and
+// the vtable being patched belongs to steamclient's adapter class rather than
+// to any one instance of it.
+void Setup()
+{
+	if ( s_bBroken )
+		return;
+
+	if ( !s_bValidatorStarted )
+	{
+		if ( !validator::Start() )
+			return;
+		s_bValidatorStarted = true;
+	}
+
+	InstallHook( (steam::ISteamGameServer *)validator::Interface() );
+
+	// If the engine has a session of its own by now, and it turns out not to
+	// share a vtable with ours, this catches the other one.
+	if ( steam::ISteamGameServer *pEngine = (steam::ISteamGameServer *)validator::EngineInterface() )
+		InstallHook( pEngine );
+}
 
 steam::EBeginAuthSessionResult HOOK_CALL Hook_BeginAuthSession( HOOK_THIS, const void *pTicket, int cbTicket, uint64_t steamID )
 {
 	const steam::EBeginAuthSessionResult result = s_pfnOriginal( HOOK_FORWARD, pTicket, cbTicket, steamID );
+
+	// The validator's own call, if it shares a vtable with the engine's
+	// interface. Diverting it into itself is how this would recurse.
+	if ( validator::IsOwnInterface( pThis ) )
+		return result;
+
+	// A hibernating server runs no frames, so this is the only chance to drain
+	// the validator's callbacks before the answer below is needed.
+	validator::Pump();
 
 	// Every other verdict, including every other kind of failure, is the
 	// engine's to act on unchanged.
@@ -82,6 +179,12 @@ void Init()
 {
 	plat::Log( "csgo-multi-appid: clients whose tickets are for appid %u will be validated separately\n",
 			   appid::Other() );
+
+	// Deliberately not left to the first frame. An empty server hibernates, and
+	// SV_Think returns before it reaches g_pServerPluginHandler->GameFrame, so
+	// on a server nobody has joined yet GameFrame may never run at all -- and
+	// that is exactly the server a client is about to connect to.
+	Setup();
 }
 
 void Tick()
@@ -89,68 +192,28 @@ void Tick()
 	if ( s_bBroken )
 		return;
 
-	// The engine creates its own Steam session at map load, long after plugins
-	// load, so everything here waits for that before doing anything.
-	if ( !s_bHooked )
-	{
-		if ( !s_Steam.GetHSteamUser && !s_Steam.Load() )
-			return;
-
-		steam::ISteamGameServer *pGameServer = s_Steam.EngineGameServer();
-		if ( !pGameServer )
-			return; // no session yet, try again next frame
-
-		// Which slot this is depends on the interface version the engine asked
-		// for, so it is looked up rather than assumed; see steam_min.h.
-		const int nSlot = steam::BeginAuthSessionSlot();
-		if ( nSlot < 0 )
-		{
-			s_bBroken = true;
-			return;
-		}
-
-		void **pVTable = *(void ***)pGameServer;
-		s_pVTableSlot = &pVTable[ nSlot ];
-		s_pfnOriginal = (BeginAuthSessionFn)*s_pVTableSlot;
-
-		void *pHook = (void *)&Hook_BeginAuthSession;
-		if ( !plat::WriteMemory( s_pVTableSlot, &pHook, sizeof( pHook ) ) )
-		{
-			plat::Warn( "csgo-multi-appid: could not install the BeginAuthSession hook;"
-						" clients from appid %u will keep being rejected\n", appid::Other() );
-			s_bBroken = true;
-			return;
-		}
-
-		s_bHooked = true;
-	}
-
-	// Start() retries on its own schedule and says so when it gives up, so
-	// this just keeps asking until it takes.
-	if ( !s_bValidatorStarted )
-	{
-		if ( !validator::Start() )
-			return;
-		s_bValidatorStarted = true;
-	}
+	// Frames are a convenience here, not the mechanism: Setup() has usually run
+	// to completion during Load(). This retries whatever did not take, and is
+	// also where the engine's interface gets picked up if it does not share a
+	// vtable with the validator's.
+	Setup();
 
 	validator::Pump();
 }
 
 void Shutdown()
 {
+	// Unhook first: the validator's interface goes away with it, and a vtable
+	// still pointing at this module would be a crash waiting to happen.
+	for ( int i = 0; i < s_nPatches; ++i )
+		plat::WriteMemory( s_Patches[ i ].ppSlot, &s_Patches[ i ].pOriginal, sizeof( void * ) );
+	s_nPatches = 0;
+
 	if ( s_bValidatorStarted )
 	{
 		validator::Stop();
 		s_bValidatorStarted = false;
 	}
-
-	if ( !s_bHooked )
-		return;
-
-	void *pOriginal = (void *)s_pfnOriginal;
-	plat::WriteMemory( s_pVTableSlot, &pOriginal, sizeof( pOriginal ) );
-	s_bHooked = false;
 }
 
 } // namespace authproxy

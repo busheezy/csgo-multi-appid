@@ -227,6 +227,11 @@ bool Start()
 	if ( s_bGaveUp )
 		return false;
 
+	// Being called before the engine has loaded steamclient is the normal case
+	// at plugin load, not a failure: it costs no attempt and says nothing.
+	if ( !steam::ModulesReady() )
+		return false;
+
 	const time_t now = time( nullptr );
 	if ( s_nAttempts && now < s_tNextAttempt )
 		return false;
@@ -282,7 +287,25 @@ void Pump()
 
 bool Ready()
 {
-	return s_bReady;
+	// Queried live: a server that hibernated straight after map load will not
+	// have run a frame since the logon completed, so a flag set in Pump() would
+	// still be false.
+	return s_bStarted && s_pServer && s_pServer->BLoggedOn();
+}
+
+bool IsOwnInterface( const void *pInterface )
+{
+	return pInterface && pInterface == (const void *)s_pServer;
+}
+
+void *Interface()
+{
+	return s_pServer;
+}
+
+void *EngineInterface()
+{
+	return s_Steam.EngineGameServer();
 }
 
 bool Validate( uint64_t steamID, const void *pTicket, int cbTicket )
