@@ -22,5 +22,10 @@ const unsigned char *FindUnique( const unsigned char *pStart, size_t nSize, cons
 
 bool WriteMemory( void *pAddr, const void *pBytes, size_t nLen );
 
+// A UDP port nothing is bound to right now, by binding one and letting go of it
+// again. 0 if none could be had. Inherently a race, so the caller has to cope
+// with the port being taken by the time it is used.
+uint16_t FreeUdpPort();
+
 void SetEnv( const char *pszKey, const char *pszValue );
 }

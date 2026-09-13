@@ -9,11 +9,14 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#include <winsock2.h>
 #include <windows.h>
 #else
 #include <dlfcn.h>
 #include <link.h>
+#include <netinet/in.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #endif
 
@@ -245,6 +248,41 @@ bool WriteMemory( void *pAddr, const void *pBytes, size_t nLen )
 	memcpy( pAddr, pBytes, nLen );
 	return true;
 #endif
+}
+
+uint16_t FreeUdpPort()
+{
+#if defined( _WIN32 )
+	SOCKET s = socket( AF_INET, SOCK_DGRAM, IPPROTO_UDP );
+	if ( s == INVALID_SOCKET )
+		return 0;
+	int nLen = sizeof( sockaddr_in );
+#else
+	int s = socket( AF_INET, SOCK_DGRAM, IPPROTO_UDP );
+	if ( s < 0 )
+		return 0;
+	socklen_t nLen = sizeof( sockaddr_in );
+#endif
+
+	sockaddr_in addr;
+	memset( &addr, 0, sizeof( addr ) );
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = INADDR_ANY;
+	addr.sin_port = 0; // the OS picks
+
+	uint16_t nPort = 0;
+	if ( bind( s, (sockaddr *)&addr, sizeof( addr ) ) == 0 &&
+		 getsockname( s, (sockaddr *)&addr, &nLen ) == 0 )
+	{
+		nPort = ntohs( addr.sin_port );
+	}
+
+#if defined( _WIN32 )
+	closesocket( s );
+#else
+	close( s );
+#endif
+	return nPort;
 }
 
 void SetEnv( const char *pszKey, const char *pszValue )

@@ -12,12 +12,17 @@ namespace validator
 namespace
 {
 
-// InitGameServer does not bind anything: the socket steam_api opens belongs to
-// SteamGameServer_Init, which this session deliberately bypasses. These two
-// values are only ever reported to the master server, and this session never
-// heartbeats, so nothing reads them.
-const uint16_t kAdvertisedGamePort = 27015;
-const uint16_t kAdvertisedQueryPort = 27015;
+// InitGameServer does bind a socket, so this session cannot be handed the real
+// server's ports -- doing that gets
+//
+//   CreateBoundSocket: ::bind couldn't find an open port between 27015 and 27015
+//
+// k_unSteamGameServerQueryPortShared tells Steam not to stand up a query
+// responder of its own, and the game port is whatever the OS had free a moment
+// ago. Neither is ever reachable or advertised: this session does not heartbeat
+// and answers nothing.
+const uint16_t kQueryPortShared = 0xFFFF;
+const int kPortAttempts = 4;
 
 // How long an auth session may sit without a verdict before it is retired.
 // Without this a client that never gets an answer would hold its session
@@ -142,10 +147,22 @@ bool Start()
 	}
 
 	// The appid is explicit here, which is the whole reason this can live in the
-	// same process as a server logged on as the other one.
-	if ( !s_pServer->InitGameServer( 0, kAdvertisedGamePort, kAdvertisedQueryPort,
-									 steam::kServerFlagDedicated | steam::kServerFlagSecure,
-									 appid::Other(), "1.0.0.0" ) )
+	// same process as a server logged on as the other one. Picking a free port
+	// and then binding it is a race, so a lost one is just retried.
+	bool bInit = false;
+	uint16_t nGamePort = 0;
+	for ( int i = 0; i < kPortAttempts && !bInit; ++i )
+	{
+		nGamePort = plat::FreeUdpPort();
+		if ( !nGamePort )
+			break;
+
+		bInit = s_pServer->InitGameServer( 0, nGamePort, kQueryPortShared,
+										   steam::kServerFlagDedicated | steam::kServerFlagSecure,
+										   appid::Other(), "1.0.0.0" );
+	}
+
+	if ( !bInit )
 	{
 		plat::Warn( "csgo-multi-appid: InitGameServer for appid %u failed\n", appid::Other() );
 		Stop();
@@ -159,6 +176,7 @@ bool Start()
 	s_pServer->LogOnAnonymous();
 
 	s_bStarted = true;
+	plat::Log( "csgo-multi-appid: validator session on port %u\n", nGamePort );
 
 	// authproxy only gets here once the engine has its own Steam session, which
 	// means CSteam3Server exists and can be located.

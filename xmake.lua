@@ -16,6 +16,7 @@ target("csgo-multi-appid")
     if is_plat("windows") then
         set_runtimes("MT")
         add_defines("WIN32_LEAN_AND_MEAN", "NOMINMAX", "_CRT_SECURE_NO_WARNINGS")
+        add_syslinks("ws2_32")
     else
         -- Valve loads plugins as <name>.so, without the lib prefix.
         set_prefixname("")
@@ -37,6 +38,7 @@ target("sigtest")
     if is_plat("windows") then
         set_runtimes("MT")
         add_defines("WIN32_LEAN_AND_MEAN", "NOMINMAX", "_CRT_SECURE_NO_WARNINGS")
+        add_syslinks("ws2_32")
     else
         add_defines("_GNU_SOURCE")
         add_cxflags("-m32", {force = true})

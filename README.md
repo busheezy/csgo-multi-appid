@@ -119,6 +119,18 @@ local user, its own game server interface. Its callbacks are pumped with
 `Steam_BGetCallback` **on that pipe alone**, so the engine's own dispatch is
 untouched. Nothing outlives the server: if it dies, the validator dies with it.
 
+`InitGameServer` does bind a socket, so the session cannot be handed the real
+server's ports:
+
+```
+CreateBoundSocket: ::bind couldn't find an open port between 27015 and 27015
+```
+
+It gets `k_unSteamGameServerQueryPortShared` for the query port, which tells
+Steam not to stand up a query responder at all, and an ephemeral game port the
+OS just confirmed was free. Neither is reachable or advertised — the session
+never heartbeats and answers nothing.
+
 There is nothing to configure and nothing to turn on: both appids are fixed
 constants, and the validator validates whichever one the server is not pinned
 to. It is not optional either, because a server that rejects every client from
@@ -191,8 +203,27 @@ The dedicated server is 32-bit on both platforms, so the plugin is too.
 
 ```sh
 xmake f -p windows -a x86  -m release -y && xmake   # Windows
-xmake f -p linux   -a i386 -m release -y && xmake   # Linux (needs g++-multilib)
+xmake f -p linux   -a i386 -m release -y && xmake   # Linux (needs a 32-bit toolchain)
 ```
+
+On Linux, build inside the [Steam Runtime 3 (sniper) SDK](https://gitlab.steamos.cloud/steamrt/steamrt/-/blob/steamrt/sniper/README.md)
+rather than whatever glibc the host happens to have:
+
+```sh
+docker run --rm -v "$PWD:/work" -w /work registry.gitlab.steamos.cloud/steamrt/sniper/sdk \
+    bash -c 'xmake f -p linux -a i386 -m release -y && xmake'
+```
+
+The dedicated server itself runs on sniper, and its glibc (2.31) is old enough
+that few hosts run anything older. A plain modern distro links in symbols the
+server's glibc doesn't have — building on Ubuntu 24.04, for instance, produces
+a `.so` that needs `GLIBC_2.34` (glibc 2.34 folded `libpthread` into `libc`,
+and thread-safe-static guard variables pull that version in even when nothing
+here touches threads) and fails to `dlopen` on almost everything currently
+deployed. sniper also comes with i386 already enabled as a foreign
+architecture and `-m32` already working, since CS:GO and the rest of Source 1
+are 32-bit and Valve's own tooling has to cross-build for it too — no
+`g++-multilib` install step needed.
 
 No SDK checkout is required. The single engine interface the plugin implements
 (`IServerPluginCallbacks`, version 004) is mirrored in `src/plugin.cpp`; it has
@@ -200,4 +231,5 @@ no virtual destructor, so the vtable layout is the same under MSVC and the
 Itanium ABI, and only the declaration order matters. `tier0`'s `Msg`/`Warning`
 are resolved at runtime rather than linked.
 
-CI builds both platforms on every push and publishes a rolling `latest` release.
+CI builds both platforms on every push — Linux inside the sniper SDK container,
+same as above — and publishes a rolling `latest` release.

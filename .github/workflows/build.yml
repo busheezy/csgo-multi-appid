@@ -45,23 +45,24 @@ jobs:
   linux:
     name: Linux (i386)
     runs-on: ubuntu-latest
+    container: registry.gitlab.steamos.cloud/steamrt/sniper/sdk
+    env:
+      # GitHub Actions runs job containers as root, and current xmake refuses
+      # to do anything as root without this.
+      XMAKE_ROOT: y
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      # The dedicated server is 32-bit, so the plugin needs the multilib toolchain.
-      - name: Install 32-bit toolchain
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get install -y g++-multilib gcc-multilib
 
       - name: Setup xmake
         uses: xmake-io/github-action-setup-xmake@v1
 
       - name: Build
         run: |
+          # The container runs as a different user than the checkout, and git
+          # refuses to touch a repo it thinks belongs to someone else.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           xmake f -p linux -a i386 -m release -y
           xmake
 
@@ -69,6 +70,10 @@ jobs:
         run: |
           xmake build sigtest
           xmake run sigtest
+
+      - name: Check glibc floor
+        run: |
+          objdump -T build/linux/i386/release/csgo-multi-appid.so | grep -o 'GLIBC_[0-9.]*' | sort -V -u | tail -1
 
       - name: Package
         run: |
