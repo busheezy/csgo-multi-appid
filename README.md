@@ -232,4 +232,6 @@ Itanium ABI, and only the declaration order matters. `tier0`'s `Msg`/`Warning`
 are resolved at runtime rather than linked.
 
 CI builds both platforms on every push — Linux inside the sniper SDK container,
-same as above — and publishes a rolling `latest` release.
+same as above — and publishes a release for every `v*` version tag. The tag is
+baked into the plugin description shown by `plugin_print`; builds outside a tag
+report `dev`.

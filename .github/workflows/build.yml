@@ -2,8 +2,15 @@ name: Build
 
 on:
   push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
   pull_request:
   workflow_dispatch:
+
+env:
+  PLUGIN_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
 
 jobs:
   windows:
@@ -89,8 +96,7 @@ jobs:
 
   release:
     name: Release
-    # Rolling release from the default branch only, never from a fork's PR.
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref_type == 'tag' && github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -120,16 +126,11 @@ jobs:
           cp csgo-multi-appid.vdf combined/addons/
           (cd combined && zip -r ../releases/csgo-multi-appid.zip .)
 
-      - name: Move the rolling tag
-        run: |
-          git tag -f latest
-          git push -f origin latest
-
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: Latest build
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           files: releases/*
-          generate_release_notes: false
+          generate_release_notes: true
           prerelease: false
