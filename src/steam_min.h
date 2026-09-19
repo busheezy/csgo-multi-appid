@@ -44,6 +44,7 @@ bool ModulesReady();
 
 const char *GameServerVersion();
 int BeginAuthSessionSlot();
+int LogOffSlot();
 
 const int kEAccountTypeGameServer = 3;
 

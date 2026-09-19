@@ -38,6 +38,7 @@ const int kMaxTicketBytes = 1400;
 #define HOOK_FORWARD pThis, nullptr
 typedef steam::EBeginAuthSessionResult( HOOK_CALL *BeginAuthSessionFn )(
 	steam::ISteamGameServer *, void *, const void *, int, uint64_t );
+typedef void( HOOK_CALL *LogOffFn )( steam::ISteamGameServer *, void * );
 #else
 // Itanium ABI: this is simply the first argument.
 #define HOOK_CALL
@@ -45,6 +46,7 @@ typedef steam::EBeginAuthSessionResult( HOOK_CALL *BeginAuthSessionFn )(
 #define HOOK_FORWARD pThis
 typedef steam::EBeginAuthSessionResult( *BeginAuthSessionFn )(
 	steam::ISteamGameServer *, const void *, int, uint64_t );
+typedef void( *LogOffFn )( steam::ISteamGameServer * );
 #endif
 
 // Set only if the hook cannot be installed; there is no way to turn the feature
@@ -59,16 +61,69 @@ struct Patch_t
 	void	*pOriginal;
 };
 
-const int			kMaxPatches = 2;
+const int			kMaxPatches = 4;
 
 steam::EBeginAuthSessionResult HOOK_CALL Hook_BeginAuthSession(
 	HOOK_THIS, const void *pTicket, int cbTicket, uint64_t steamID );
+void HOOK_CALL Hook_LogOff( HOOK_THIS );
 
 bool				s_bBroken;
 bool				s_bValidatorStarted;
 BeginAuthSessionFn	s_pfnOriginal;
+LogOffFn			s_pfnOriginalLogOff;
 Patch_t				s_Patches[ kMaxPatches ];
 int					s_nPatches;
+
+bool IsPatched( void **ppSlot )
+{
+	for ( int i = 0; i < s_nPatches; ++i )
+	{
+		if ( s_Patches[ i ].ppSlot == ppSlot )
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void InstallLogOffHook( void **pVTable )
+{
+	const int nSlot = steam::LogOffSlot();
+	if ( nSlot < 0 )
+	{
+		return;
+	}
+
+	void **ppSlot = &pVTable[ nSlot ];
+	if ( IsPatched( ppSlot ) )
+	{
+		return;
+	}
+
+	if ( s_nPatches >= kMaxPatches )
+	{
+		return;
+	}
+
+	LogOffFn pfnOriginal = (LogOffFn)*ppSlot;
+	if ( s_pfnOriginalLogOff && pfnOriginal != s_pfnOriginalLogOff )
+	{
+		return;
+	}
+
+	void *pHook = (void *)&Hook_LogOff;
+	if ( !plat::WriteMemory( ppSlot, &pHook, sizeof( pHook ) ) )
+	{
+		plat::Warn( "csgo-multi-appid: could not install the LogOff hook;"
+					" the validator session will outlive the engine's at shutdown\n" );
+		return;
+	}
+
+	s_pfnOriginalLogOff = pfnOriginal;
+	s_Patches[ s_nPatches ].ppSlot = ppSlot;
+	s_Patches[ s_nPatches ].pOriginal = (void *)pfnOriginal;
+	++s_nPatches;
+}
 
 bool InstallHook( steam::ISteamGameServer *pServer )
 {
@@ -85,10 +140,10 @@ bool InstallHook( steam::ISteamGameServer *pServer )
 	void **pVTable = *(void ***)pServer;
 	void **ppSlot = &pVTable[ nSlot ];
 
-	for ( int i = 0; i < s_nPatches; ++i )
+	if ( IsPatched( ppSlot ) )
 	{
-		if ( s_Patches[ i ].ppSlot == ppSlot )
-			return true; // already patched, whoever asked for it
+		InstallLogOffHook( pVTable );
+		return true;
 	}
 
 	if ( s_nPatches >= kMaxPatches )
@@ -117,7 +172,20 @@ bool InstallHook( steam::ISteamGameServer *pServer )
 	s_Patches[ s_nPatches ].ppSlot = ppSlot;
 	s_Patches[ s_nPatches ].pOriginal = (void *)pfnOriginal;
 	++s_nPatches;
+
+	InstallLogOffHook( pVTable );
 	return true;
+}
+
+void StopValidator()
+{
+	if ( !s_bValidatorStarted )
+	{
+		return;
+	}
+
+	validator::Stop();
+	s_bValidatorStarted = false;
 }
 
 // Everything the feature needs, done as early as it can be done. Nothing here
@@ -173,6 +241,17 @@ steam::EBeginAuthSessionResult HOOK_CALL Hook_BeginAuthSession( HOOK_THIS, const
 	return steam::k_EBeginAuthSessionResultOK;
 }
 
+void HOOK_CALL Hook_LogOff( HOOK_THIS )
+{
+	const bool bOwn = validator::IsOwnInterface( pThis );
+	if ( !bOwn )
+	{
+		StopValidator();
+	}
+
+	s_pfnOriginalLogOff( HOOK_FORWARD );
+}
+
 } // namespace
 
 void Init()
@@ -209,11 +288,7 @@ void Shutdown()
 		plat::WriteMemory( s_Patches[ i ].ppSlot, &s_Patches[ i ].pOriginal, sizeof( void * ) );
 	s_nPatches = 0;
 
-	if ( s_bValidatorStarted )
-	{
-		validator::Stop();
-		s_bValidatorStarted = false;
-	}
+	StopValidator();
 }
 
 } // namespace authproxy
